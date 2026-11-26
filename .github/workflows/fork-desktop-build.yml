@@ -1,4 +1,4 @@
-name: Fork Desktop Installers
+name: Fork Desktop Release
 
 on:
   push:
@@ -6,56 +6,137 @@ on:
 
 permissions:
   contents: read
-  packages: read
 
 jobs:
-  package:
+  prepare:
     if: github.repository == 'js2me/paseo'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    outputs:
+      tag: ${{ steps.release.outputs.tag }}
+      version: ${{ steps.release.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Prepare fork prerelease
+        id: release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          base=$(node -p 'require("./package.json").version.split("-")[0]')
+          version="$base-js2me.$((GITHUB_RUN_NUMBER + 1))"
+          tag="fork-desktop-v$version"
+          {
+            echo "version=$version"
+            echo "tag=$tag"
+          } >> "$GITHUB_OUTPUT"
+
+          if ! gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release create "$tag" --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
+              --draft --prerelease --latest=false --title "Paseo Desktop $version" --notes-file - <<EOF
+          Unofficial desktop build of \`$GITHUB_REPOSITORY\` from commit \`$GITHUB_SHA\`.
+
+          Download the installer for your platform from Assets. Installers appear as each build passes its smoke checks. macOS packages are ad-hoc signed but not notarized. Windows packages do not carry the official Paseo signature. Install updates from this fork manually.
+
+          [Build results](https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID)
+          EOF
+          fi
+          test "$(gh release view "$tag" --repo "$GITHUB_REPOSITORY" --json targetCommitish --jq .targetCommitish)" = "$GITHUB_SHA"
+
+  package:
+    needs: prepare
     name: ${{ matrix.name }}
     runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    permissions:
+      contents: write
     strategy:
       fail-fast: false
       matrix:
         include:
+          - name: linux-x64
+            runner: ubuntu-latest
+            target: --linux AppImage --x64
+            heap: 8192
+            asset: Paseo-x86_64.AppImage
           - name: windows-x64
             runner: windows-latest
             target: --win nsis --x64
             heap: 8192
-            assets: packages/desktop/release/*Setup*.exe
+            asset: Paseo-Setup-*-x64.exe
           - name: macos-arm64
             runner: macos-latest
             target: --mac dmg --arm64 -c.mac.notarize=false -c.mac.identity=- -c.mac.hardenedRuntime=false
             heap: 4096
-            assets: packages/desktop/release/*.dmg
+            asset: Paseo-*-arm64.dmg
           - name: macos-x64
             runner: macos-26-intel
             target: --mac dmg --x64 -c.mac.notarize=false -c.mac.identity=- -c.mac.hardenedRuntime=false
             heap: 8192
-            assets: packages/desktop/release/*.dmg
-
+            asset: Paseo-*-x64.dmg
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - uses: actions/setup-node@v4
         with:
           node-version: 22
           cache: npm
       - name: Install dependencies
         run: node scripts/npm-retry.mjs ci
-      - name: Build installer
+      - name: Install Linux smoke display
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y xvfb xauth
+      - name: Set desktop version
+        shell: bash
+        env:
+          DESKTOP_VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          node --input-type=commonjs <<'NODE'
+          const fs = require("node:fs");
+          const path = "packages/desktop/package.json";
+          const pkg = JSON.parse(fs.readFileSync(path, "utf8"));
+          pkg.version = process.env.DESKTOP_VERSION;
+          fs.writeFileSync(path, JSON.stringify(pkg, null, 2) + "\n");
+          NODE
+      - name: Build installer and run packaged smoke
         shell: bash
         env:
           CSC_IDENTITY_AUTO_DISCOVERY: "false"
           EP_GH_IGNORE_TIME: "true"
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           NODE_OPTIONS: --max-old-space-size=${{ matrix.heap }}
           PASEO_DESKTOP_SMOKE: "1"
           PASEO_DESKTOP_SMOKE_ARTIFACT_DIR: ${{ runner.temp }}/desktop-smoke
           TARGET: ${{ matrix.target }}
         run: |
+          set -euo pipefail
           read -r -a target <<< "$TARGET"
           npm run build:desktop -- "${target[@]}" --publish never -c.publish.releaseType=prerelease -c.publish.channel=beta
+      - name: Publish installer to fork
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.prepare.outputs.tag }}
+          ASSET: ${{ matrix.asset }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          cd packages/desktop/release
+          installers=($ASSET)
+          if [[ ${#installers[@]} -ne 1 ]]; then
+            echo "Expected one installer for $ASSET, found ${#installers[@]}" >&2
+            exit 1
+          fi
+          installer="${installers[0]}"
+          sha256sum "$installer" > "$installer.sha256"
+          gh release upload "$TAG" "$installer" "$installer.sha256" --repo "$GITHUB_REPOSITORY" --clobber
+          gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --draft=false --latest=false
       - uses: actions/upload-artifact@v4
+        if: failure()
         with:
-          name: ${{ matrix.name }}
-          path: ${{ matrix.assets }}
-          if-no-files-found: error
+          name: desktop-smoke-${{ matrix.name }}
+          path: ${{ runner.temp }}/desktop-smoke
+          if-no-files-found: ignore
