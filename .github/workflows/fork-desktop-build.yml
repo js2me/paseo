@@ -1,0 +1,61 @@
+name: Fork Desktop Installers
+
+on:
+  push:
+    branches: [fork-release/combined-desktop]
+
+permissions:
+  contents: read
+  packages: read
+
+jobs:
+  package:
+    if: github.repository == 'js2me/paseo'
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: windows-x64
+            runner: windows-latest
+            target: --win nsis --x64
+            heap: 8192
+            assets: packages/desktop/release/*Setup*.exe
+          - name: macos-arm64
+            runner: macos-latest
+            target: --mac dmg --arm64 -c.mac.notarize=false
+            heap: 4096
+            assets: packages/desktop/release/*.dmg
+          - name: macos-x64
+            runner: macos-26-intel
+            target: --mac dmg --x64 -c.mac.notarize=false
+            heap: 8192
+            assets: packages/desktop/release/*.dmg
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - name: Install dependencies
+        run: node scripts/npm-retry.mjs ci
+      - name: Build installer
+        shell: bash
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: "false"
+          EP_GH_IGNORE_TIME: "true"
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          NODE_OPTIONS: --max-old-space-size=${{ matrix.heap }}
+          PASEO_DESKTOP_SMOKE: "1"
+          PASEO_DESKTOP_SMOKE_ARTIFACT_DIR: ${{ runner.temp }}/desktop-smoke
+          TARGET: ${{ matrix.target }}
+        run: |
+          read -r -a target <<< "$TARGET"
+          npm run build:desktop -- "${target[@]}" --publish never -c.publish.releaseType=prerelease -c.publish.channel=beta
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.name }}
+          path: ${{ matrix.assets }}
+          if-no-files-found: error
