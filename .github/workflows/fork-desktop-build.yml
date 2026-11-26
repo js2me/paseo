@@ -2,7 +2,7 @@ name: Fork Desktop Installers
 
 on:
   push:
-    branches: [fork-release/combined-desktop]
+    branches: [fork-release/macos-arm64-fallback]
 
 permissions:
   contents: read
@@ -17,22 +17,11 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - name: windows-x64
-            runner: windows-latest
-            target: --win nsis --x64
-            heap: 8192
-            assets: packages/desktop/release/*Setup*.exe
           - name: macos-arm64
-            runner: macos-latest
+            runner: macos-15
             target: --mac dmg --arm64 -c.mac.notarize=false -c.mac.identity=- -c.mac.hardenedRuntime=false
             heap: 4096
             assets: packages/desktop/release/*.dmg
-          - name: macos-x64
-            runner: macos-26-intel
-            target: --mac dmg --x64 -c.mac.notarize=false -c.mac.identity=- -c.mac.hardenedRuntime=false
-            heap: 8192
-            assets: packages/desktop/release/*.dmg
-
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
